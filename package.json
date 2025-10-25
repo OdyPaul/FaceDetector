@@ -10,6 +10,7 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "@shopify/react-native-skia": "2.2.12",
     "expo": "~54.0.20",
     "expo-build-properties": "~1.0.9",
     "expo-dev-client": "~6.0.16",
@@ -25,5 +26,8 @@
     "react-native-vision-camera-face-detector": "^1.9.1",
     "react-native-worklets": "0.5.1",
     "react-native-worklets-core": "^1.6.2"
+  },
+  "devDependencies": {
+    "babel-preset-expo": "^54.0.6"
   }
 }
