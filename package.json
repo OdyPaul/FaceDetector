@@ -1,18 +1,29 @@
 {
   "name": "facedetector",
   "version": "1.0.0",
+  "private": true,
   "main": "index.js",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "web": "expo start --web"
   },
   "dependencies": {
     "expo": "~54.0.20",
+    "expo-build-properties": "~1.0.9",
+    "expo-dev-client": "~6.0.16",
     "expo-status-bar": "~3.0.8",
+    "expo-updates": "~29.0.12",
     "react": "19.1.0",
-    "react-native": "0.81.5"
-  },
-  "private": true
+    "react-native": "0.81.5",
+    "react-native-gesture-handler": "~2.28.0",
+    "react-native-reanimated": "~4.1.1",
+    "react-native-screens": "~4.16.0",
+    "react-native-toast-message": "^2.2.0",
+    "react-native-vision-camera": "^4.7.2",
+    "react-native-vision-camera-face-detector": "^1.9.1",
+    "react-native-worklets": "0.5.1",
+    "react-native-worklets-core": "^1.6.2"
+  }
 }
