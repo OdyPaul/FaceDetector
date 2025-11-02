@@ -13,6 +13,12 @@
       "./app.plugin.js",
       "react-native-vision-camera",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to access your photos to choose a reference image."
+        }
+      ],
+      [
         "expo-build-properties",
         {
           "android": {
@@ -28,12 +34,18 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "This app uses the camera to detect faces."
+        "NSCameraUsageDescription": "This app uses the camera to detect faces.",
+        "NSPhotoLibraryUsageDescription": "Allow $(PRODUCT_NAME) to access your photos to choose a reference image.",
+        "NSPhotoLibraryAddUsageDescription": "Allow $(PRODUCT_NAME) to save photos."
       }
     },
 
     "android": {
-      "permissions": ["CAMERA"],
+      "permissions": [
+        "CAMERA",
+        "READ_MEDIA_IMAGES",
+        "READ_EXTERNAL_STORAGE"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -48,15 +60,21 @@
       "backgroundColor": "#ffffff"
     },
 
-    "web": { "favicon": "./assets/favicon.png" },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
 
     "extra": {
-      "eas": { "projectId": "9317e8dc-b1b5-47c4-b387-5a05897bb306" }
+      "eas": {
+        "projectId": "9317e8dc-b1b5-47c4-b387-5a05897bb306"
+      }
     },
 
     "owner": "nalah1234",
 
-    "runtimeVersion": { "policy": "appVersion" },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
 
     "updates": {
       "url": "https://u.expo.dev/9317e8dc-b1b5-47c4-b387-5a05897bb306"

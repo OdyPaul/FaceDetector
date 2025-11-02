@@ -1,334 +1,381 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import Toast from 'react-native-toast-message';
-import { useCameraDevice, useCameraPermission } from 'react-native-vision-camera';
-import { Camera as FaceCamera } from 'react-native-vision-camera-face-detector';
+// App.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Image,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import Toast from "react-native-toast-message";
+import { useCameraDevice, useCameraPermission } from "react-native-vision-camera";
+import { Camera as FaceCamera } from "react-native-vision-camera-face-detector";
+import * as ImagePicker from "expo-image-picker";
+
+// 🔑 Luxand
+const LUXAND_API_KEY = "c3cc8b5ab1a747eca4977a76ad173ffd";
+const LUXAND_COMPARE_URL = "https://api.luxand.cloud/photo/similarity";
+const MATCH_THRESHOLD = 0.8;
 
 export default function App() {
-  const device = useCameraDevice('front');
+  const device = useCameraDevice("front");
   const { hasPermission, requestPermission } = useCameraPermission();
   const cameraRef = useRef(null);
 
   const [cameraOn, setCameraOn] = useState(false);
   const [faces, setFaces] = useState([]);
-  const [photo, setPhoto] = useState('');
-
-  // Blink gating (no auto-capture)
-  const OPEN_T = 0.6;            // slightly looser than before to help testing
-  const CLOSED_T = 0.3;
-  const CONSEC = 3;
-  const CLOSE_MAX_MS = 900;
-  const TOTAL_TIMEOUT_MS = 7000;
-
-  const fsmRef = useRef({ state: 'WAIT_OPEN', openCount: 0, closeCount: 0, t0: 0, lastSeen: 0 });
+  const [selfieUri, setSelfieUri] = useState("");
+  const [galleryUri, setGalleryUri] = useState("");
   const [livenessPassed, setLivenessPassed] = useState(false);
-  const [countdown, setCountdown] = useState(0);
   const [canCapture, setCanCapture] = useState(false);
-  const countdownTimerRef = useRef(null);
-  const [debugOpen, setDebugOpen] = useState(null); // shows openness 0..1
+  const [countdown, setCountdown] = useState(0);
+  const [debugOpen, setDebugOpen] = useState(null);
+  const [compareResult, setCompareResult] = useState(null);
+  const [isComparing, setIsComparing] = useState(false);
 
+  // Blink FSM
+  const OPEN_T = 0.6, CLOSED_T = 0.3, CONSEC = 3, CLOSE_MAX_MS = 900, TOTAL_TIMEOUT_MS = 7000;
+  const fsmRef = useRef({ state: "WAIT_OPEN", openCount: 0, closeCount: 0, t0: 0, lastSeen: 0 });
+  const countdownRef = useRef(null);
   const facePresent = useMemo(() => faces.length === 1, [faces]);
 
-  useEffect(() => () => clearCountdown(), []);
+  useEffect(() => () => clearTimeout(countdownRef.current), []);
 
   useEffect(() => {
     if (countdown > 0) {
-      countdownTimerRef.current = setTimeout(() => setCountdown(n => n - 1), 1000);
-    } else {
-      clearCountdown();
-      if (livenessPassed) setCanCapture(true);
+      countdownRef.current = setTimeout(() => setCountdown(n => n - 1), 1000);
+    } else if (livenessPassed) {
+      setCanCapture(true);
     }
-    return () => clearTimeout(countdownTimerRef.current);
+    return () => clearTimeout(countdownRef.current);
   }, [countdown, livenessPassed]);
 
-  const clearCountdown = () => {
-    if (countdownTimerRef.current) {
-      clearTimeout(countdownTimerRef.current);
-      countdownTimerRef.current = null;
-    }
-  };
-
   const resetFSM = () => {
-    fsmRef.current = { state: 'WAIT_OPEN', openCount: 0, closeCount: 0, t0: 0, lastSeen: 0 };
+    fsmRef.current = { state: "WAIT_OPEN", openCount: 0, closeCount: 0, t0: 0, lastSeen: 0 };
   };
-
   const fullReset = () => {
     resetFSM();
     setLivenessPassed(false);
     setCanCapture(false);
     setCountdown(0);
     setDebugOpen(null);
+    setCompareResult(null);
+  };
+  const hardResetAll = () => {
+    setSelfieUri("");
+    setGalleryUri("");
+    setFaces([]);
+    setCameraOn(false);
+    fullReset();
   };
 
   const askPermissionAndStart = async () => {
-    if (!hasPermission) {
-      const ok = await requestPermission();
-      if (!ok) {
-        Toast.show({ type: 'error', text1: 'Camera permission is required' });
-        return;
-      }
+    if (!hasPermission && !(await requestPermission())) {
+      Toast.show({ type: "error", text1: "Camera permission required" });
+      return;
     }
     if (!device) {
-      Toast.show({ type: 'error', text1: 'No camera device found' });
+      Toast.show({ type: "error", text1: "No camera found" });
       return;
     }
-    setPhoto('');
+    setSelfieUri("");
+    setCompareResult(null);
     setCameraOn(true);
     fullReset();
   };
 
-  const backToHome = () => {
-    setCameraOn(false);
-    setPhoto('');
-    fullReset();
-  };
+  const getEyeOpenness = (f) =>
+    Math.max(
+      ...[
+        f?.leftEyeOpenProbability,
+        f?.rightEyeOpenProbability,
+        f?.leftEyeOpen,
+        f?.rightEyeOpen,
+      ].filter((v) => typeof v === "number")
+    );
 
-  const retake = () => {
-    setPhoto('');
-    setCameraOn(true);
-    fullReset();
-  };
-
-  const getEyeOpenness = (face) => {
-    const candidates = [
-      face?.leftEyeOpenProbability, face?.rightEyeOpenProbability,
-      face?.leftEyeOpen, face?.rightEyeOpen,
-      face?.leftEye?.probability, face?.rightEye?.probability,
-    ].filter(v => typeof v === 'number');
-    if (!candidates.length) return null;
-    return Math.max(...candidates);
-  };
-
-  const onFaces = (detected) => {
-    const arr = Array.isArray(detected) ? detected : [];
+  const onFaces = (arr) => {
     setFaces(arr);
-
     if (arr.length !== 1) {
-      if ((livenessPassed || canCapture || countdown > 0) && cameraOn) {
-        Toast.show({ type: 'info', text1: 'Show exactly one face' });
-      }
-      setLivenessPassed(false);
-      setCanCapture(false);
-      setCountdown(0);
-      setDebugOpen(null);
-      resetFSM();
+      fullReset();
       return;
     }
-
-    // --- BLINK FSM ---
     const face = arr[0];
-    const openness = getEyeOpenness(face);
-    setDebugOpen(typeof openness === 'number' ? Number(openness.toFixed(2)) : null);
-
-    if (typeof openness !== 'number') {
-      // If you see null here, classification probably isn't enabled (see faceDetectionOptions below)
-      return;
-    }
-
-    const now = Date.now();
-    const f = fsmRef.current;
+    const open = getEyeOpenness(face);
+    if (isNaN(open)) return;
+    const now = Date.now(), f = fsmRef.current;
     f.lastSeen = now;
 
-    if (openness >= OPEN_T) {
-      f.openCount += 1;
-      f.closeCount = 0;
-    } else if (openness <= CLOSED_T) {
-      f.closeCount += 1;
-      f.openCount = 0;
-    } else {
-      f.openCount = Math.max(0, f.openCount - 1);
-      f.closeCount = Math.max(0, f.closeCount - 1);
-    }
+    if (open >= OPEN_T) { f.openCount++; f.closeCount = 0; }
+    else if (open <= CLOSED_T) { f.closeCount++; f.openCount = 0; }
 
     if (!f.t0) f.t0 = now;
-    if (now - f.t0 > TOTAL_TIMEOUT_MS) {
-      resetFSM();
-      return;
-    }
+    if (now - f.t0 > TOTAL_TIMEOUT_MS) return resetFSM();
 
-    if (f.state === 'WAIT_OPEN' && f.openCount >= CONSEC) {
-      f.state = 'WAIT_CLOSE';
-      f.t0 = now;
-    } else if (f.state === 'WAIT_CLOSE' && f.closeCount >= CONSEC) {
-      f.state = 'WAIT_REOPEN';
-      f.t0 = now;
-    } else if (f.state === 'WAIT_REOPEN') {
-      if (now - f.t0 > CLOSE_MAX_MS) {
-        resetFSM();
-        return;
-      }
+    if (f.state === "WAIT_OPEN" && f.openCount >= CONSEC) { f.state = "WAIT_CLOSE"; f.t0 = now; }
+    else if (f.state === "WAIT_CLOSE" && f.closeCount >= CONSEC) { f.state = "WAIT_REOPEN"; f.t0 = now; }
+    else if (f.state === "WAIT_REOPEN") {
+      if (now - f.t0 > CLOSE_MAX_MS) return resetFSM();
       if (f.openCount >= CONSEC && !livenessPassed) {
         setLivenessPassed(true);
         setCanCapture(false);
-        setCountdown(3); // 3..2..1 then unlock shutter
-        Toast.show({ type: 'success', text1: 'Blink detected — ready for capture' });
+        setCountdown(3);
+        Toast.show({ type: "success", text1: "Blink detected — ready for capture" });
       }
     }
+    setDebugOpen(open.toFixed(2));
   };
 
   const takeShot = async () => {
-    if (!cameraRef.current) return;
-    if (!canCapture) {
-      Toast.show({ type: 'info', text1: 'Blink to enable the shutter' });
+    if (!cameraRef.current || !canCapture) {
+      Toast.show({ type: "info", text1: "Blink first to unlock shutter" });
       return;
     }
     try {
       const shot = await cameraRef.current.takePhoto({});
-      setPhoto(`file://${shot.path}`);
+      const uri = shot.path.startsWith("file://") ? shot.path : `file://${shot.path}`;
+      setSelfieUri(uri);
       setCameraOn(false);
     } catch (e) {
-      Toast.show({ type: 'error', text1: 'Capture failed', text2: String(e?.message || e) });
+      Toast.show({ type: "error", text1: "Capture failed", text2: String(e?.message || e) });
     }
   };
 
-  // ---------- UI ----------
-  if (photo) {
-    return (
-      <View style={styles.container}>
-        <Image source={{ uri: photo }} style={styles.preview} />
-        <View style={styles.bottomRow}>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={retake}>
-            <Text style={styles.secondaryText}>Retake</Text>
-          </TouchableOpacity>
-        </View>
-        <Toast />
-      </View>
-    );
-  }
+  // Gallery picker (expo-image-picker)
+  const pickFromGallery = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Toast.show({ type: "error", text1: "Permission denied", text2: "Enable photo access to pick an image." });
+      return;
+    }
 
-  if (!cameraOn) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.title}>Face Verification</Text>
-        <Text style={styles.subtitle}>Tap below to activate your camera.</Text>
-        <TouchableOpacity onPress={askPermissionAndStart} style={styles.primaryBtn}>
-          <Text style={styles.primaryText}>Activate Camera</Text>
-        </TouchableOpacity>
-        {!device && <Text style={styles.warn}>No camera device found</Text>}
-        <Toast />
-      </View>
-    );
-  }
+    const res = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 1,
+      allowsEditing: false,
+    });
 
-  if (!device || !hasPermission) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator />
-        <Text style={styles.subtitle}>{device ? 'Waiting for permission…' : 'No camera device found'}</Text>
-        <Toast />
-      </View>
-    );
-  }
-
-  const fsmState = fsmRef.current.state;
-
-  // IMPORTANT: classificationMode: 'all' to get eye probabilities
-  const faceDetectionOptions = {
-    performanceMode: 'fast',
-    classificationMode: 'all', // <-- REQUIRED for left/rightEyeOpenProbability
-    contourMode: 'none',
-    landmarkMode: 'none',
-    trackingEnabled: false,
-    minFaceSize: 0.15,         // make sure face is not too small
+    if (res.canceled) return;
+    const uri = res.assets?.[0]?.uri;
+    if (!uri) {
+      Toast.show({ type: "error", text1: "No image selected" });
+      return;
+    }
+    setGalleryUri(uri);
   };
 
-  return (
-    <View style={styles.container}>
-      <View style={{ flex: 1, borderRadius: 10, overflow: 'hidden' }}>
+  // ---- Luxand compare (normalized to handle {similarity} OR {score, similar})
+  const compareFaces = async () => {
+    if (!selfieUri || !galleryUri) {
+      Toast.show({ type: "info", text1: "Add both photos first" });
+      return;
+    }
+    try {
+      setIsComparing(true);
+      setCompareResult(null);
+
+      const form = new FormData();
+      form.append("threshold", MATCH_THRESHOLD.toString());
+      form.append("face1", { uri: selfieUri, name: "selfie.jpg", type: "image/jpeg" });
+      form.append("face2", { uri: galleryUri, name: "reference.jpg", type: "image/jpeg" });
+
+      const resp = await fetch(LUXAND_COMPARE_URL, {
+        method: "POST",
+        headers: { token: LUXAND_API_KEY, Accept: "application/json" },
+        body: form, // do NOT set Content-Type manually
+      });
+
+      const raw = await resp.text();
+      let json;
+      try { json = JSON.parse(raw); } catch { json = null; }
+
+      if (!resp.ok) {
+        const msg = json?.error || raw || `HTTP ${resp.status}`;
+        throw new Error(msg);
+      }
+
+      // Luxand variants:
+      // A) { similarity: number }
+      // B) { score: number, similar: boolean }
+      const similarity =
+        typeof json?.similarity === "number"
+          ? json.similarity
+          : typeof json?.score === "number"
+          ? json.score
+          : 0;
+
+      const matched =
+        typeof json?.similar === "boolean"
+          ? json.similar
+          : similarity >= MATCH_THRESHOLD;
+
+      setCompareResult({ similarity, matched });
+
+      Toast.show({
+        type: matched ? "success" : "error",
+        text1: matched ? "Face match!" : "Not a match",
+        text2: `Similarity: ${(similarity * 100).toFixed(1)}%`,
+      });
+
+      console.log("Luxand response:", json);
+    } catch (e) {
+      Toast.show({ type: "error", text1: "Compare failed", text2: String(e?.message || e) });
+      console.warn("Luxand compare error:", e);
+    } finally {
+      setIsComparing(false);
+    }
+  };
+
+  // ---- Camera screen
+  if (cameraOn)
+    return (
+      <View style={styles.cameraContainer}>
         <FaceCamera
           ref={cameraRef}
           style={styles.camera}
           device={device}
-          isActive={true}
-          photo={true}
+          isActive
+          photo
           faceDetectionCallback={onFaces}
-          faceDetectionOptions={faceDetectionOptions}
+          faceDetectionOptions={{ classificationMode: "all" }}
         />
+        <TouchableOpacity onPress={hardResetAll} style={styles.backBtn}>
+          <Text style={styles.backText}>‹ Back</Text>
+        </TouchableOpacity>
+        <View style={styles.overlayTop}>
+          <Text style={styles.overlayText}>
+            {livenessPassed ? (countdown > 0 ? `Ready • ${countdown}` : "Ready for capture") : "Blink to verify liveness"}
+          </Text>
+          {debugOpen && <Text style={styles.debugText}>Eye openness: {debugOpen}</Text>}
+        </View>
+        <View style={styles.bottomRow}>
+          <TouchableOpacity
+            onPress={takeShot}
+            style={[styles.shutter, !canCapture && styles.shutterDisabled]}
+            disabled={!canCapture}
+          />
+        </View>
+        <Toast />
+      </View>
+    );
 
-        {/* Back button (lower-left) */}
-        <View style={styles.backWrap}>
-          <TouchableOpacity onPress={backToHome} style={styles.backBtn}>
-            <Text style={styles.backText}>‹ Back</Text>
+  // ---- Two-box main UI
+  return (
+    <View style={styles.mainContainer}>
+      <Text style={styles.mainTitle}>Face Comparison</Text>
+
+      <View style={styles.row}>
+        {/* Selfie box */}
+        <View style={styles.box}>
+          <Text style={styles.label}>1. Capture Selfie</Text>
+          {selfieUri ? (
+            <Image source={{ uri: selfieUri }} style={styles.preview} />
+          ) : (
+            <Text style={styles.placeholder}>No image</Text>
+          )}
+          <TouchableOpacity onPress={askPermissionAndStart} style={styles.primaryBtn}>
+            <Text style={styles.primaryText}>{selfieUri ? "Retake" : "Open Face Detector"}</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Top instructions */}
-        <View style={styles.overlayTop}>
-          {faces.length === 0 && <Text style={styles.overlayText}>Show your face in the frame</Text>}
-          {faces.length > 1 && <Text style={styles.overlayText}>Only one person please</Text>}
-          {facePresent && !livenessPassed && (
-            <Text style={styles.overlayText}>
-              {fsmState === 'WAIT_OPEN' ? 'Step 1: Eyes open'
-               : fsmState === 'WAIT_CLOSE' ? 'Step 2: Blink (close eyes)'
-               : 'Step 3: Open eyes again'}
-            </Text>
+        {/* Gallery box */}
+        <View style={styles.box}>
+          <Text style={styles.label}>2. Reference (Gallery)</Text>
+          {galleryUri ? (
+            <Image source={{ uri: galleryUri }} style={styles.preview} />
+          ) : (
+            <Text style={styles.placeholder}>No image</Text>
           )}
-          {livenessPassed && (
-            <Text style={styles.overlayText}>
-              Ready for capture {countdown > 0 ? `• ${countdown}` : ''}
-            </Text>
-          )}
-          {typeof debugOpen === 'number' && (
-            <Text style={styles.debugText}>Eye openness: {debugOpen}</Text>
-          )}
-        </View>
-
-        {/* Faces counter (debug) */}
-        <View style={styles.overlayCounter}>
-          <Text style={styles.counterText}>Faces: {faces.length}</Text>
+          <TouchableOpacity onPress={pickFromGallery} style={styles.primaryBtn}>
+            <Text style={styles.primaryText}>{galleryUri ? "Change Photo" : "Pick from Gallery"}</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
-      {/* Shutter: enabled only after countdown finished */}
-      <View style={styles.bottomRow}>
-        <TouchableOpacity
-          onPress={takeShot}
-          style={[styles.shutterButton, !canCapture && styles.shutterDisabled]}
-          disabled={!canCapture}
-        />
-        {!canCapture && <Text style={styles.hint}>Blink to enable the shutter</Text>}
-      </View>
+      <TouchableOpacity
+        onPress={compareFaces}
+        disabled={!selfieUri || !galleryUri || isComparing}
+        style={[styles.compareBtn, (!selfieUri || !galleryUri || isComparing) && { opacity: 0.6 }]}
+      >
+        {isComparing ? <ActivityIndicator color="#fff" /> : <Text style={styles.compareText}>Compare Faces</Text>}
+      </TouchableOpacity>
+
+      {compareResult && (
+        <Text style={[styles.resultText, { color: compareResult.matched ? "#16A34A" : "#DC2626" }]}>
+          {compareResult.matched ? "✅ Face Match!" : "❌ Not a Match"} ({(compareResult.similarity * 100).toFixed(1)}%)
+        </Text>
+      )}
 
       <Toast />
     </View>
   );
 }
 
+// ---------- Styles ----------
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  center: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
-  title: { color: '#fff', fontSize: 22, fontWeight: '700', marginBottom: 8 },
-  subtitle: { color: '#aaa', fontSize: 14, textAlign: 'center', marginBottom: 20 },
-  primaryBtn: { backgroundColor: '#4F8EF7', paddingHorizontal: 18, paddingVertical: 12, borderRadius: 12 },
-  primaryText: { color: '#fff', fontWeight: '700' },
-  secondaryBtn: { borderColor: '#fff', borderWidth: 1.5, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12 },
-  secondaryText: { color: '#fff', fontWeight: '600' },
-  warn: { marginTop: 8, color: '#f77' },
+  mainContainer: {
+    flex: 1,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    paddingTop: 50,
+    paddingHorizontal: 12,
+  },
+  mainTitle: { fontSize: 22, fontWeight: "700", color: "#111", marginBottom: 20 },
+  row: { flexDirection: "row", gap: 10, width: "100%" },
+  box: {
+    flex: 1,
+    borderWidth: 2,
+    borderStyle: "dashed",
+    borderColor: "#9CA3AF",
+    borderRadius: 12,
+    backgroundColor: "#f9fafb",
+    padding: 12,
+    alignItems: "center",
+  },
+  label: { fontWeight: "700", color: "#111", marginBottom: 8 },
+  placeholder: { color: "#9CA3AF", marginTop: 40 },
+  preview: { width: "100%", aspectRatio: 3 / 4, borderRadius: 8, marginBottom: 10 },
+  primaryBtn: {
+    backgroundColor: "#2563EB",
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+  },
+  primaryText: { color: "#fff", fontWeight: "600" },
+  compareBtn: {
+    backgroundColor: "#16A34A",
+    marginTop: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 28,
+    borderRadius: 12,
+  },
+  compareText: { color: "#fff", fontWeight: "800", fontSize: 16 },
+  resultText: { marginTop: 14, fontWeight: "700", fontSize: 16 },
 
+  // Camera view
+  cameraContainer: { flex: 1, backgroundColor: "#000", justifyContent: "center" },
   camera: { flex: 1 },
-
+  backBtn: {
+    position: "absolute",
+    bottom: 30,
+    left: 20,
+    padding: 8,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    borderRadius: 10,
+  },
+  backText: { color: "#fff", fontWeight: "700" },
   overlayTop: {
-    position: 'absolute', top: 16, alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.45)', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, alignItems: 'center'
+    position: "absolute",
+    top: 16,
+    alignSelf: "center",
+    backgroundColor: "rgba(0,0,0,0.5)",
+    padding: 10,
+    borderRadius: 10,
   },
-  overlayText: { color: '#fff', fontWeight: '700' },
-  debugText: { color: '#ddd', fontSize: 12, marginTop: 2 },
-
-  overlayCounter: {
-    position: 'absolute', top: 16, right: 16,
-    backgroundColor: 'rgba(0,0,0,0.45)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10
-  },
-  counterText: { color: '#fff', fontWeight: '600', fontSize: 12 },
-
-  bottomRow: { position: 'absolute', bottom: 28, width: '100%', alignItems: 'center', gap: 8 },
-
-  backWrap: { position: 'absolute', bottom: 28, left: 20 },
-  backBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.45)' },
-  backText: { color: '#fff', fontWeight: '700' },
-
-  shutterButton: { width: 70, height: 70, borderRadius: 35, backgroundColor: '#fff' },
-  shutterDisabled: { backgroundColor: '#777' },
-  hint: { color: '#ccc', marginTop: 6, fontSize: 12 },
-
-  preview: { flex: 1, borderRadius: 10, margin: 12 },
+  overlayText: { color: "#fff", fontWeight: "700" },
+  debugText: { color: "#ddd", fontSize: 12, marginTop: 2 },
+  bottomRow: { position: "absolute", bottom: 28, width: "100%", alignItems: "center" },
+  shutter: { width: 70, height: 70, borderRadius: 35, backgroundColor: "#fff" },
+  shutterDisabled: { backgroundColor: "#777" },
 });
