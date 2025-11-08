@@ -12,6 +12,7 @@
   "dependencies": {
     "@shopify/react-native-skia": "2.2.12",
     "expo": "~54.0.20",
+    "expo-brightness": "^14.0.7",
     "expo-build-properties": "~1.0.9",
     "expo-dev-client": "~6.0.16",
     "expo-image-picker": "~17.0.8",
