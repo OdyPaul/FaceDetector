@@ -14,20 +14,17 @@ import { Camera as FaceCamera } from "react-native-vision-camera-face-detector";
 import * as ImagePicker from "expo-image-picker";
 
 /* =================== CONFIG =================== */
-// Face compare (unchanged)
 const LUXAND_API_KEY = "c3cc8b5ab1a747eca4977a76ad173ffd";
 const LUXAND_COMPARE_URL = "https://api.luxand.cloud/photo/similarity";
 const MATCH_THRESHOLD = 0.8;
 
-// Liveness thresholds
-const REQUIRED_MOVES = 3;     // ← set to 4 if you want four actions
+const REQUIRED_MOVES = 3;
 const OPEN_T = 0.6;
 const CLOSED_T = 0.3;
 const CONSEC = 3;
 const CLOSE_MAX_MS = 900;
 const TOTAL_TIMEOUT_MS = 7000;
 
-// Action challenge
 const ACTIONS = ["TURN_LEFT", "TURN_RIGHT", "LOOK_UP", "LOOK_DOWN"];
 const ACTION_LABEL = {
   TURN_LEFT: "Turn head LEFT",
@@ -91,6 +88,13 @@ export default function App() {
   // Blink FSM
   const fsmRef = useRef({ state: "WAIT_OPEN", openCount: 0, closeCount: 0, t0: 0, lastSeen: 0 });
 
+  // Prevent extra prompts after finishing
+  const doneRef = useRef(false);
+
+  // Refs to make auto-capture robust against stale closures
+  const canCaptureRef = useRef(false);
+  const autoTimerRef = useRef(null);
+
   // Action state
   const actionRef = useRef({
     active: false,
@@ -111,13 +115,39 @@ export default function App() {
     landmarkMode: "none",
     contourMode: "none",
     trackingEnabled: false,
-    // minFaceSize: 0.15, // uncomment if detection is finicky on small faces
   }).current;
 
+  // Auto-capture when ready (uses refs to avoid stale state)
   useEffect(() => {
-    setCanCapture(blinkPassed && successCount >= REQUIRED_MOVES);
-  }, [blinkPassed, successCount]);
+    const ready = blinkPassed && successCount >= REQUIRED_MOVES;
+    setCanCapture(ready);
+    canCaptureRef.current = ready;
+    doneRef.current = ready;
 
+    // clear any previous timer
+    if (autoTimerRef.current) {
+      clearTimeout(autoTimerRef.current);
+      autoTimerRef.current = null;
+    }
+
+    if (ready && cameraOn && cameraRef.current) {
+      Toast.hide();
+      Toast.show({ type: "info", text1: "Auto-capturing in 3 seconds..." });
+      autoTimerRef.current = setTimeout(async () => {
+        if (!cameraRef.current || !canCaptureRef.current) return;
+        await captureNow(); // direct capture without checking state again
+      }, 3000);
+    }
+
+    return () => {
+      if (autoTimerRef.current) {
+        clearTimeout(autoTimerRef.current);
+        autoTimerRef.current = null;
+      }
+    };
+  }, [blinkPassed, successCount, cameraOn]);
+
+  // Action countdown tick
   useEffect(() => {
     if (!actionRef.current.active) return;
     const id = setInterval(() => {
@@ -139,9 +169,16 @@ export default function App() {
     setBlinkPassed(false);
     setSuccessCount(0);
     setCanCapture(false);
+    canCaptureRef.current = false;
     setDebugOpen(null);
     setDebugPose(null);
     setCompareResult(null);
+    doneRef.current = false;
+
+    if (autoTimerRef.current) {
+      clearTimeout(autoTimerRef.current);
+      autoTimerRef.current = null;
+    }
 
     actionRef.current = {
       active: false,
@@ -192,13 +229,14 @@ export default function App() {
   };
 
   const startAction = (face) => {
+    if (doneRef.current) return;
     const { yaw, pitch } = getAngles(face);
     const target = pickTarget(actionRef.current.lastTarget);
     const now = Date.now();
     actionRef.current = {
       active: true,
       target,
-      baseline: { yaw, pitch }, // delta vs current pose
+      baseline: { yaw, pitch },
       consec: 0,
       startedAt: now,
       deadline: now + ACTION_TIMEOUT_MS,
@@ -210,6 +248,12 @@ export default function App() {
   };
 
   const rerollAction = () => {
+    if (doneRef.current) {
+      actionRef.current.active = false;
+      setActionTarget(null);
+      setTimeLeft(0);
+      return;
+    }
     const current = faces?.[0];
     if (!current) {
       actionRef.current.active = false;
@@ -224,10 +268,10 @@ export default function App() {
     const dyaw = current.yaw - baseline.yaw;
     const dpitch = current.pitch - baseline.pitch;
     switch (target) {
-      case "TURN_LEFT":  return dyaw >= YAW_DEG;       // +yaw
-      case "TURN_RIGHT": return dyaw <= -YAW_DEG;      // -yaw
-      case "LOOK_UP":    return dpitch <= -PITCH_DEG;  // -pitch
-      case "LOOK_DOWN":  return dpitch >= PITCH_DEG;   // +pitch
+      case "TURN_LEFT":  return dyaw >= YAW_DEG;
+      case "TURN_RIGHT": return dyaw <= -YAW_DEG;
+      case "LOOK_UP":    return dpitch <= -PITCH_DEG;
+      case "LOOK_DOWN":  return dpitch >= PITCH_DEG;
       default: return false;
     }
   };
@@ -236,7 +280,8 @@ export default function App() {
   const onFaces = (arr) => {
     setFaces(arr);
 
-    // Require exactly one face (tolerate brief flickers)
+    if (doneRef.current) return;
+
     if (arr.length !== 1) {
       const now = Date.now();
       const f = fsmRef.current;
@@ -258,7 +303,6 @@ export default function App() {
     const fsm = fsmRef.current;
     fsm.lastSeen = now;
 
-    // Debug pose to help tune thresholds
     const angles = getAngles(face);
     setDebugPose(`yaw ${angles.yaw.toFixed(1)} • pitch ${angles.pitch.toFixed(1)}`);
 
@@ -280,8 +324,9 @@ export default function App() {
         if (now - fsm.t0 > CLOSE_MAX_MS) return resetFSM();
         if (fsm.openCount >= CONSEC) {
           setBlinkPassed(true);
+          Toast.hide();
           Toast.show({ type: "success", text1: "Blink detected" });
-          startAction(face); // start first move
+          startAction(face);
         }
       }
       return;
@@ -303,23 +348,23 @@ export default function App() {
           setTimeLeft(0);
 
           if (next >= REQUIRED_MOVES) {
-            Toast.show({ type: "success", text1: "Liveness passed — you can now capture" });
+            Toast.hide();
+            Toast.show({ type: "success", text1: "Liveness passed — capturing soon" });
+            doneRef.current = true;
+            canCaptureRef.current = true;
+            setCanCapture(true);
           } else {
-            setTimeout(() => startAction(face), 300); // gentle handoff to next move
+            setTimeout(() => startAction(face), 300);
           }
         }
       } else {
-        actionRef.current.consec = 0; // must be sustained
+        actionRef.current.consec = 0;
       }
     }
   };
 
   /* -------- capture & compare -------- */
-  const takeShot = async () => {
-    if (!cameraRef.current || !canCapture) {
-      Toast.show({ type: "info", text1: `Complete blink + ${REQUIRED_MOVES} moves first` });
-      return;
-    }
+  const captureNow = async () => {
     try {
       const shot = await cameraRef.current.takePhoto({});
       const uri = fileUri(shot.path);
@@ -328,6 +373,14 @@ export default function App() {
     } catch (e) {
       Toast.show({ type: "error", text1: "Capture failed", text2: String(e?.message || e) });
     }
+  };
+
+  const takeShot = async () => {
+    if (!cameraRef.current || !canCapture) {
+      Toast.show({ type: "info", text1: `Complete blink + ${REQUIRED_MOVES} moves first` });
+      return;
+    }
+    await captureNow();
   };
 
   const pickFromGallery = async () => {
